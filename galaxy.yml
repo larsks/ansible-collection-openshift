@@ -1,0 +1,16 @@
+namespace: oddbit
+name: openshift
+version: 1.0.0
+readme: README.md
+authors:
+- Lars Kellogg-Stedman <lars@oddbit.com>
+description: Plugins for interacting with an OpenShift cluster
+license:
+- GPL-2.0-or-later
+tags:
+  - openshift
+  - kubernetes
+  - redhat
+repository: http://github.com/larsks/ansible-collection-openshift
+issues: http://github.com/larsks/ansible-collection-openshift/issues
+build_ignore: []
