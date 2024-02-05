@@ -7,16 +7,20 @@ DOCUMENTATION = r"""
 name: ocnodes
 plugin_type: inventory
 short_description: Inventory of openshift nodes
+extends_documentation_fragment:
+    - constructed
 options:
     plugin:
+        type: str
         description: Name of the plugin
         required: true
         choices: ['oddbit.openshift.ocnodes']
     group:
+        type: str
         description: Add nodes to named group
         required: false
-        default: 'openshift_nodes'
     group_vars:
+        type: dict
         description: Arbitrary group variables
         required: false
 """
@@ -33,75 +37,83 @@ class InventoryModule(BaseInventoryPlugin, Constructable, Cacheable):
             return path.endswith("openshift.yaml")
         return False
 
+    def _set_variables(self, hostvars):
+        strict = self.get_option("strict")
+
+        for host in hostvars:
+            for varname, varvalue in hostvars[host].items():
+                self.inventory.set_variable(host, varname, varvalue)
+
+            # create composite vars
+            self._set_composite_vars(
+                self.get_option("compose"), hostvars[host], host, strict=strict
+            )
+
+            # constructed groups based on conditionals
+            self._add_host_to_composed_groups(
+                self.get_option("groups"), hostvars[host], host, strict=strict
+            )
+
+            # constructed keyed_groups
+            self._add_host_to_keyed_groups(
+                self.get_option("keyed_groups"), hostvars[host], host, strict=strict
+            )
+
+    def _create_node_variables(self, name, node):
+        hostvars = {}
+
+        roles = [
+            label.split("/")[1]
+            for label in node.model.metadata.labels
+            if label.startswith("node-role.kubernetes.io")
+        ]
+
+        hostvars["node_roles"] = roles
+        hostvars["node_labels"] = node.model.metadata.labels
+        hostvars["node_annotations"] = node.model.metadata.annotations
+        hostvars["node_info"] = node.model.status.nodeInfo
+        hostvars["node_addresses"] = node.model.status.addresses
+        hostvars["node_ready"] = next(
+            (
+                condition["status"] == "True"
+                for condition in node.model.status.conditions
+                if condition["type"] == "Ready"
+            ),
+            False,
+        )
+
+        return hostvars
+
     def parse(self, inventory, loader, path, cache: bool = True):
         super(InventoryModule, self).parse(inventory, loader, path, cache)
-        self._read_config_data(path)  # This also loads the cache
+        self._read_config_data(path)
 
-        self.plugin = self.get_option("plugin")
-        if self.plugin != "oddbit.openshift.ocnodes":
-            raise AnsibleParserError("invalid plugin configuration")
+        group_name = None
+        if self.has_option("group"):
+            group_name = self.get_option("group")
+            if group_name:
+                self.inventory.add_group(group_name)
+                if self.has_option("group_vars"):
+                    for name, value in self.get_option("group_vars").items():
+                        self.inventory.set_variable(group_name, name, value)
 
-        group_name = (
-            self.get_option("group") if self.has_option("group") else "openshift_nodes"
-        )
-        self.inventory.add_group(group_name)
-        group = self.inventory.groups[group_name]
+        nodes = oc.selector("nodes").objects()
+        hostvars = {}
+        for node in nodes:
+            name = node.model.metadata.name
+            self.inventory.add_host(name, group=group_name)
 
-        if self.has_option("group_vars"):
-            for name, value in self.get_option("group_vars").items():
-                self.inventory.set_variable(group_name, name, value)
+            if "addresses" in node.model.status:
+                try:
+                    address = next(
+                        addr["address"]
+                        for addr in node.model.status.addresses
+                        if addr["type"] == "InternalIP"
+                    )
+                    self.inventory.set_variable(name, "ansible_host", address)
+                except StopIteration:
+                    pass
 
-        nodes = {
-            node.model.metadata.name: node.model.status.addresses[0].address
-            for node in oc.selector("nodes").objects()
-        }
-        for name, address in nodes.items():
-            self.inventory.add_host(name)
-            self.inventory.set_variable(name, "ansible_host", address)
-            group.add_host(self.inventory.hosts[name])
+            hostvars[name] = self._create_node_variables(name, node)
 
-            node = oc.selector(f"nodes/{name}").object()
-
-            roles = [
-                label.split("/")[1]
-                for label in node.model.metadata.labels
-                if label.startswith("node-role.kubernetes.io")
-            ]
-
-            self.inventory.set_variable(
-                name,
-                "node_roles",
-                roles,
-            )
-            self.inventory.set_variable(
-                name,
-                "node_labels",
-                node.model.metadata.labels,
-            )
-            self.inventory.set_variable(
-                name,
-                "node_annotations",
-                node.model.metadata.annotations,
-            )
-            self.inventory.set_variable(
-                name,
-                "node_info",
-                node.model.status.nodeInfo,
-            )
-            self.inventory.set_variable(
-                name,
-                "node_addresses",
-                node.model.status.addresses,
-            )
-            self.inventory.set_variable(
-                name,
-                "node_ready",
-                next(
-                    (
-                        condition["status"] == "True"
-                        for condition in node.model.status.conditions
-                        if condition["type"] == "Ready"
-                    ),
-                    False,
-                ),
-            )
+        self._set_variables(hostvars)
